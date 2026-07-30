@@ -20,6 +20,7 @@ import (
 	"github.com/brianshea2/addr.tools/internal/dnsutil"
 	"github.com/brianshea2/addr.tools/internal/httputil"
 	"github.com/brianshea2/addr.tools/internal/netutil"
+	"github.com/brianshea2/addr.tools/internal/probereport"
 	"github.com/brianshea2/addr.tools/internal/status"
 	"github.com/brianshea2/addr.tools/internal/ttlstore"
 	"github.com/brianshea2/addr.tools/internal/zones/challenges"
@@ -38,14 +39,26 @@ const (
 )
 
 type Config struct {
-	HTTPSocketPath        string
-	RequestLogPath        string
-	DatabasePath          string
-	ValkeyURL             string
-	TLSCertPath           string
-	TLSKeyPath            string
-	LookupUpstream        string
-	IPInfoBaseURL         string
+	HTTPSocketPath string
+	// HTTPListenAddr is a host:port for the HTTP API, as an alternative (or
+	// addition) to HTTPSocketPath. See the listener below for why this exists.
+	HTTPListenAddr string
+	RequestLogPath string
+	DatabasePath   string
+	ValkeyURL      string
+	TLSCertPath    string
+	TLSKeyPath     string
+	LookupUpstream string
+	// LookupAllowedZones restricts the /dns/{name}/{type} endpoint to these
+	// zones. Required whenever LookupUpstream is set — see the fatal at the
+	// handler's registration for why there is no permissive default.
+	LookupAllowedZones []string
+	IPInfoBaseURL      string
+	// ProbeReportEnabled exposes GET /api/report?token=, which reports what a
+	// visitor's resolver did using observations the CoreDNS probe plugin wrote
+	// to Valkey. Requires ValkeyURL — that key space is the only thing the two
+	// programs share.
+	ProbeReportEnabled    bool
 	MyaddrTurnstileSecret string
 	DnscheckZones         []struct {
 		*dnscheck.DnscheckHandler
@@ -131,6 +144,17 @@ func (config *Config) Run() {
 		}
 		defer valkeyClient.Close()
 		log.Printf("[info] connected to %v", config.ValkeyURL)
+	}
+
+	// init the probe report endpoint (read side of the CoreDNS probe plugin)
+	if config.ProbeReportEnabled {
+		if valkeyClient == nil {
+			log.Fatal("ProbeReportEnabled requires ValkeyURL: the probe plugin's observations live in Valkey and there is nowhere else to read them from")
+		}
+		http.Handle("/api/report", &probereport.HTTPHandler{
+			Store: &probereport.Store{Client: valkeyClient},
+		})
+		log.Print("[info] serving /api/report from valkey")
 	}
 
 	// init persistent data store
@@ -252,7 +276,17 @@ func (config *Config) Run() {
 
 	// set dns lookup handler
 	if len(config.LookupUpstream) > 0 {
-		http.Handle("/dns/{name}/{type}", &dns2json.LookupHandler{Upstream: config.LookupUpstream})
+		// Refused rather than defaulted: an unrestricted lookup endpoint is an
+		// open resolver reachable over HTTP, usable as a reconnaissance proxy
+		// and an amplification reflector against our own address. There is no
+		// safe implicit value for this.
+		if len(config.LookupAllowedZones) == 0 {
+			log.Fatal("LookupUpstream is set but LookupAllowedZones is empty: refusing to serve an unrestricted lookup endpoint")
+		}
+		http.Handle("/dns/{name}/{type}", &dns2json.LookupHandler{
+			Upstream:     config.LookupUpstream,
+			AllowedZones: config.LookupAllowedZones,
+		})
 	}
 
 	// start dns listeners
@@ -338,6 +372,32 @@ func (config *Config) Run() {
 				MsgAcceptFunc: dnsutil.MsgAcceptFunc,
 				Handler:       dnsHandler,
 			}).ActivateAndServe())
+		}()
+	}
+
+	// start http tcp listener
+	//
+	// Added for the hivre.com lab fork. Upstream serves HTTP over a unix socket
+	// only, which works when nginx runs on the same host but not in Kubernetes:
+	// an ingress controller in another pod cannot reach a socket inside this
+	// one. The alternative was a socat/nginx sidecar in every pod purely to
+	// translate TCP to a unix socket, which is a moving part with no other
+	// purpose. Both listeners can run at once; set whichever the deployment
+	// needs.
+	if len(config.HTTPListenAddr) > 0 {
+		go func() {
+			log.Printf("[info] starting http tcp listener on %s", config.HTTPListenAddr)
+			ln, err := net.Listen("tcp", config.HTTPListenAddr)
+			if err != nil {
+				log.Fatal(err)
+			}
+			// ReadHeaderTimeout, unlike upstream's bare &http.Server{}: this
+			// listener is reachable from the network rather than from a
+			// same-host nginx, so a client that opens a connection and never
+			// finishes its headers would otherwise hold a goroutine forever.
+			log.Fatal((&http.Server{
+				ReadHeaderTimeout: 10 * time.Second,
+			}).Serve(ln))
 		}()
 	}
 

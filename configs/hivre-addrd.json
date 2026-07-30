@@ -48,6 +48,27 @@
     ],
     "HTTPSocketPath": "/data/addrd/addrd.sock",
 
+    "_comment_listen": [
+        "TCP listener, added in this fork. Upstream serves HTTP over a unix",
+        "socket only, which works behind a same-host nginx but not in",
+        "Kubernetes: Traefik runs in another pod and cannot reach a socket",
+        "inside this one. The alternative was a socat sidecar in every pod",
+        "purely to translate TCP to a unix socket. Both listeners can run at",
+        "once; in k3s only this one is needed."
+    ],
+    "HTTPListenAddr": ":8080",
+
+    "_comment_report": [
+        "GET /api/report?token= — the read side of the CoreDNS probe plugin.",
+        "Requires ValkeyURL: the plugin writes probe:seen:<token> and",
+        "probe:obs:<token>, and that key space is the ONLY thing the two",
+        "programs share (no linked code, which is what keeps the MIT plugin",
+        "clear of this repository's AGPL). Tokens are validated as 8-32",
+        "lowercase hex before they reach Valkey, or the query string would be",
+        "a way to name arbitrary keys."
+    ],
+    "ProbeReportEnabled": true,
+
     "_comment_valkey": [
         "The label-correlation store, and the seam between the two programs: the",
         "CoreDNS probe plugin writes label -> observation, this web tier reads.",
@@ -68,6 +89,16 @@
         "validate the type against a short enum before this ships publicly."
     ],
     "LookupUpstream": "",
+
+    "_comment_lookup_zones": [
+        "REQUIRED whenever LookupUpstream is set — addrd refuses to start",
+        "otherwise, rather than defaulting to 'anything'. An unrestricted",
+        "lookup endpoint is an open resolver reachable over HTTP: a",
+        "reconnaissance proxy and an amplification reflector using our address",
+        "and reputation. Names outside these zones get 403 with a pointer to",
+        "dns.google / DNSViz."
+    ],
+    "LookupAllowedZones": ["hivre.com"],
 
     "IPInfoBaseURL": "",
     "TLSCertPath": "",
