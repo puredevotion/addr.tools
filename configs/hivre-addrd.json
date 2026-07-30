@@ -1,0 +1,84 @@
+{
+    "_comment": [
+        "addrd config for the hivre.com DNS-experimentation lab (homelab",
+        "docs/plans/dns-experimentation-lab.md). Only two of upstream's zones are",
+        "enabled: the dnscheck probe zone and the dns-01 challenge helper. Dyn and",
+        "Myaddr are deliberately omitted -- every zone block in internal/config is",
+        "individually optional (nil/len guarded), so leaving them out disables them",
+        "entirely rather than needing code changes.",
+        "",
+        "SECRETS: PrivateKey values are base64 raw key material and MUST NOT be",
+        "committed. They come from sops + the mkSecretService pattern, same shape as",
+        "cloudflare/api_token. This file carries empty placeholders only.",
+        "",
+        "Generate an ECDSA P-256 (algorithm 13) keypair with addrd itself:",
+        "",
+        "  addrd -k check.hivre.com. -a 13",
+        "",
+        "That prints three things: the DS record to publish at the registrar",
+        "(Metaregistrar, for hivre.com), the DNSKEY record whose final base64 field",
+        "is the PublicKey value below, and `;privKey: <base64>` which is the",
+        "PrivateKey value. Without the DS published registrar-side the zone",
+        "validates as insecure and every 'did your resolver validate?' probe on the",
+        "lab page reports the uninteresting answer.",
+        "",
+        "Algorithm 13 (ECDSAP256SHA256) is chosen over 15 (ED25519) for validator",
+        "reach, and over anything larger for response size: this zone is directly",
+        "public and every byte of signature is amplification ammunition."
+    ],
+
+    "_comment_socket": [
+        "Keep this path SHORT. It is a unix socket, so the whole path must fit in",
+        "sockaddr_un's 108-byte sun_path; addrd exits with",
+        "'bind: invalid argument' -- which says nothing about length -- when it",
+        "doesn't. Easy to hit in Kubernetes, where a volume path plus a generated",
+        "pod/subpath name gets long fast. Traefik fronts this socket (not nginx as",
+        "in upstream's configs/nginx-http.conf)."
+    ],
+    "HTTPSocketPath": "/data/addrd/addrd.sock",
+    "RequestLogPath": "/data/addrd/log/dns.log",
+    "DatabasePath": "/data/addrd/db.json",
+
+    "_comment_valkey": [
+        "The label-correlation store. Prefer the existing Valkey HA cluster over",
+        "the local db.json: this is short-TTL disposable state, and pointing it at",
+        "Valkey keeps the pod itself stateless. Set ValkeyURL to use it (upstream",
+        "prefers ValkeyURL over DatabasePath when both are set)."
+    ],
+    "ValkeyURL": "",
+
+    "_comment_lookup": [
+        "The recursive resolver the /api/lookup JSON endpoint queries. The plan",
+        "calls for Unbound with `ede: yes` so Extended DNS Errors and the AD bit",
+        "are real rather than synthesised. Until that exists, any validating",
+        "resolver works, but EDE readouts will be empty."
+    ],
+    "LookupUpstream": "",
+
+    "IPInfoBaseURL": "",
+    "TLSCertPath": "",
+    "TLSKeyPath": "",
+    "MyaddrTurnstileSecret": "",
+
+    "DnscheckZones": [
+        {
+            "Zone": "check.hivre.com.",
+            "Ns": ["dns.hivre.com."],
+            "SigningKey": {
+                "Algorithm": 13,
+                "PublicKey": ""
+            },
+            "PrivateKey": ""
+        }
+    ],
+
+    "ChallengesZone": {
+        "Zone": "challenges.hivre.com.",
+        "Ns": ["dns.hivre.com."],
+        "SigningKey": {
+            "Algorithm": 13,
+            "PublicKey": ""
+        },
+        "PrivateKey": ""
+    }
+}
