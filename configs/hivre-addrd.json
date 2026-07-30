@@ -1,84 +1,75 @@
 {
     "_comment": [
         "addrd config for the hivre.com DNS-experimentation lab (homelab",
-        "docs/plans/dns-experimentation-lab.md). Only two of upstream's zones are",
-        "enabled: the dnscheck probe zone and the dns-01 challenge helper. Dyn and",
-        "Myaddr are deliberately omitted -- every zone block in internal/config is",
-        "individually optional (nil/len guarded), so leaving them out disables them",
-        "entirely rather than needing code changes.",
+        "docs/plans/dns-experimentation-lab.md).",
         "",
-        "SECRETS: PrivateKey values are base64 raw key material and MUST NOT be",
-        "committed. They come from sops + the mkSecretService pattern, same shape as",
-        "cloudflare/api_token. This file carries empty placeholders only.",
+        "WEB TIER ONLY -- this instance serves NO DNS.",
         "",
-        "Generate an ECDSA P-256 (algorithm 13) keypair with addrd itself:",
+        "All authoritative DNS for hivre.com is CoreDNS's job: the hidden primary",
+        "for the apex zone, and a purpose-written probe-zone plugin for",
+        "check.hivre.com. Two reasons it is not addrd's job:",
         "",
-        "  addrd -k check.hivre.com. -a 13",
+        "  1. Response Rate Limiting. github.com/coredns/rrl is wired into the",
+        "     CoreDNS build and is what gates exposing any authoritative zone of",
+        "     ours to the public internet. It protects CoreDNS only. A probe zone",
+        "     served by addrd would be the single directly-public authoritative",
+        "     listener with no RRL in front of it -- precisely backwards.",
+        "  2. Licensing. This fork is AGPL-3.0; the CoreDNS plugin repo is MIT.",
+        "     Keeping the two as separate programs that share nothing but a Valkey",
+        "     key space keeps that boundary clean -- no linking, no combined work.",
         "",
-        "That prints three things: the DS record to publish at the registrar",
-        "(Metaregistrar, for hivre.com), the DNSKEY record whose final base64 field",
-        "is the PublicKey value below, and `;privKey: <base64>` which is the",
-        "PrivateKey value. Without the DS published registrar-side the zone",
-        "validates as insecure and every 'did your resolver validate?' probe on the",
-        "lab page reports the uninteresting answer.",
+        "Every zone block in internal/config is individually nil/len guarded, so",
+        "omitting DnscheckZones / ChallengesZone / DynZone / MyaddrZones disables",
+        "them outright with no code change, and the DNS listeners answer nothing.",
         "",
-        "Algorithm 13 (ECDSAP256SHA256) is chosen over 15 (ED25519) for validator",
-        "reach, and over anything larger for response size: this zone is directly",
-        "public and every byte of signature is amplification ammunition."
+        "KNOWN GAP, not solved by config alone: the /watch/{watcher} websocket --",
+        "the live 'here is what your resolver did' stream -- is registered inside",
+        "the `len(config.DnscheckZones) > 0` block in internal/config/config.go and",
+        "is fed in-process by addrd's own DNS handler pushing into a",
+        "dnscheck.SimpleWatcherHub. With zones disabled it is neither registered",
+        "nor fed. Serving the UI web-only therefore requires feeding that hub from",
+        "Valkey (what the CoreDNS probe plugin writes) instead of from a local DNS",
+        "handler. Upstream also has no /api/report?token= endpoint at all -- its",
+        "design is websocket push, not a report store -- so the plan's report-API",
+        "shape is ours to add.",
+        "",
+        "What IS reusable unmodified: the SPA under website/dnscheck.tools/, and",
+        "the /dns/{name}/{type} JSON lookup handler, which is registered",
+        "independently of any zone and needs only LookupUpstream."
     ],
 
     "_comment_socket": [
         "Keep this path SHORT. It is a unix socket, so the whole path must fit in",
         "sockaddr_un's 108-byte sun_path; addrd exits with",
-        "'bind: invalid argument' -- which says nothing about length -- when it",
-        "doesn't. Easy to hit in Kubernetes, where a volume path plus a generated",
-        "pod/subpath name gets long fast. Traefik fronts this socket (not nginx as",
-        "in upstream's configs/nginx-http.conf)."
+        "'bind: invalid argument' -- which names neither the length nor the path --",
+        "when it doesn't. Easy to trip in Kubernetes, where a volume path plus a",
+        "generated pod/subpath name gets long fast. Traefik fronts this socket",
+        "(not nginx as in upstream's configs/nginx-http.conf)."
     ],
     "HTTPSocketPath": "/data/addrd/addrd.sock",
-    "RequestLogPath": "/data/addrd/log/dns.log",
-    "DatabasePath": "/data/addrd/db.json",
 
     "_comment_valkey": [
-        "The label-correlation store. Prefer the existing Valkey HA cluster over",
-        "the local db.json: this is short-TTL disposable state, and pointing it at",
-        "Valkey keeps the pod itself stateless. Set ValkeyURL to use it (upstream",
-        "prefers ValkeyURL over DatabasePath when both are set)."
+        "The label-correlation store, and the seam between the two programs: the",
+        "CoreDNS probe plugin writes label -> observation, this web tier reads.",
+        "Points at the existing Valkey HA cluster. Short TTLs, disposable state,",
+        "so this pod stays stateless -- do not set DatabasePath alongside it."
     ],
     "ValkeyURL": "",
 
     "_comment_lookup": [
-        "The recursive resolver the /api/lookup JSON endpoint queries. The plan",
-        "calls for Unbound with `ede: yes` so Extended DNS Errors and the AD bit",
-        "are real rather than synthesised. Until that exists, any validating",
-        "resolver works, but EDE readouts will be empty."
+        "Recursive resolver behind the /dns/{name}/{type} JSON lookup endpoint.",
+        "The plan calls for Unbound with `ede: yes` so Extended DNS Errors and the",
+        "AD bit are real rather than synthesised. Any validating resolver works",
+        "until that exists, but EDE readouts will be empty.",
+        "",
+        "SECURITY: never let this become an open 'look up anything' proxy -- that",
+        "is a reconnaissance relay and an amplification reflector using our IP.",
+        "Restrict names to hivre.com zones or a small curated allowlist and",
+        "validate the type against a short enum before this ships publicly."
     ],
     "LookupUpstream": "",
 
     "IPInfoBaseURL": "",
     "TLSCertPath": "",
-    "TLSKeyPath": "",
-    "MyaddrTurnstileSecret": "",
-
-    "DnscheckZones": [
-        {
-            "Zone": "check.hivre.com.",
-            "Ns": ["dns.hivre.com."],
-            "SigningKey": {
-                "Algorithm": 13,
-                "PublicKey": ""
-            },
-            "PrivateKey": ""
-        }
-    ],
-
-    "ChallengesZone": {
-        "Zone": "challenges.hivre.com.",
-        "Ns": ["dns.hivre.com."],
-        "SigningKey": {
-            "Algorithm": 13,
-            "PublicKey": ""
-        },
-        "PrivateKey": ""
-    }
+    "TLSKeyPath": ""
 }
