@@ -21,12 +21,45 @@ const (
 
 type LookupHandler struct {
 	Upstream string
+	// AllowedZones restricts which names may be looked up. A name is allowed
+	// when it equals, or sits below, one of these zones.
+	//
+	// Without it this endpoint is an open resolver reachable over HTTP: anyone
+	// can aim it at any name, which makes it a reconnaissance proxy and an
+	// amplification reflector using OUR address and reputation rather than
+	// theirs. That is why config refuses to enable the endpoint with an empty
+	// list rather than defaulting to "anything", and why every comparable
+	// public tool answers only for its own zones.
+	AllowedZones []string
+}
+
+// allows reports whether qname may be looked up.
+func (h *LookupHandler) allows(qname string) bool {
+	// Empty list is fail-closed on purpose. If this is ever reached with no
+	// zones configured, answering nothing is the safe reading of an
+	// underspecified config -- not answering everything.
+	fqdn := dns.Fqdn(qname)
+	for _, z := range h.AllowedZones {
+		if dns.IsSubDomain(dns.Fqdn(z), fqdn) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *LookupHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	qname := req.PathValue("name")
 	if _, ok := dns.IsDomainName(qname); !ok {
 		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	if !h.allows(qname) {
+		// Deliberately explicit about why, and where to go instead: a visitor
+		// wanting to look up an arbitrary name has legitimate options, they are
+		// just not this endpoint.
+		http.Error(w,
+			"this endpoint only resolves names in the lab's own zones; use dns.google or DNSViz for arbitrary lookups",
+			http.StatusForbidden)
 		return
 	}
 	qtype := dns.StringToType[strings.ToUpper(req.PathValue("type"))]

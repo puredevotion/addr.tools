@@ -1,0 +1,106 @@
+{
+    "_comment": [
+        "addrd config for the hivre.com DNS-experimentation lab (homelab",
+        "docs/plans/dns-experimentation-lab.md).",
+        "",
+        "WEB TIER ONLY -- this instance serves NO DNS.",
+        "",
+        "All authoritative DNS for hivre.com is CoreDNS's job: the hidden primary",
+        "for the apex zone, and a purpose-written probe-zone plugin for",
+        "check.hivre.com. Two reasons it is not addrd's job:",
+        "",
+        "  1. Response Rate Limiting. github.com/coredns/rrl is wired into the",
+        "     CoreDNS build and is what gates exposing any authoritative zone of",
+        "     ours to the public internet. It protects CoreDNS only. A probe zone",
+        "     served by addrd would be the single directly-public authoritative",
+        "     listener with no RRL in front of it -- precisely backwards.",
+        "  2. Licensing. This fork is AGPL-3.0; the CoreDNS plugin repo is MIT.",
+        "     Keeping the two as separate programs that share nothing but a Valkey",
+        "     key space keeps that boundary clean -- no linking, no combined work.",
+        "",
+        "Every zone block in internal/config is individually nil/len guarded, so",
+        "omitting DnscheckZones / ChallengesZone / DynZone / MyaddrZones disables",
+        "them outright with no code change, and the DNS listeners answer nothing.",
+        "",
+        "KNOWN GAP, not solved by config alone: the /watch/{watcher} websocket --",
+        "the live 'here is what your resolver did' stream -- is registered inside",
+        "the `len(config.DnscheckZones) > 0` block in internal/config/config.go and",
+        "is fed in-process by addrd's own DNS handler pushing into a",
+        "dnscheck.SimpleWatcherHub. With zones disabled it is neither registered",
+        "nor fed. Serving the UI web-only therefore requires feeding that hub from",
+        "Valkey (what the CoreDNS probe plugin writes) instead of from a local DNS",
+        "handler. Upstream also has no /api/report?token= endpoint at all -- its",
+        "design is websocket push, not a report store -- so the plan's report-API",
+        "shape is ours to add.",
+        "",
+        "What IS reusable unmodified: the SPA under website/dnscheck.tools/, and",
+        "the /dns/{name}/{type} JSON lookup handler, which is registered",
+        "independently of any zone and needs only LookupUpstream."
+    ],
+
+    "_comment_socket": [
+        "Keep this path SHORT. It is a unix socket, so the whole path must fit in",
+        "sockaddr_un's 108-byte sun_path; addrd exits with",
+        "'bind: invalid argument' -- which names neither the length nor the path --",
+        "when it doesn't. Easy to trip in Kubernetes, where a volume path plus a",
+        "generated pod/subpath name gets long fast. Traefik fronts this socket",
+        "(not nginx as in upstream's configs/nginx-http.conf)."
+    ],
+    "HTTPSocketPath": "/data/addrd/addrd.sock",
+
+    "_comment_listen": [
+        "TCP listener, added in this fork. Upstream serves HTTP over a unix",
+        "socket only, which works behind a same-host nginx but not in",
+        "Kubernetes: Traefik runs in another pod and cannot reach a socket",
+        "inside this one. The alternative was a socat sidecar in every pod",
+        "purely to translate TCP to a unix socket. Both listeners can run at",
+        "once; in k3s only this one is needed."
+    ],
+    "HTTPListenAddr": ":8080",
+
+    "_comment_report": [
+        "GET /api/report?token= — the read side of the CoreDNS probe plugin.",
+        "Requires ValkeyURL: the plugin writes probe:seen:<token> and",
+        "probe:obs:<token>, and that key space is the ONLY thing the two",
+        "programs share (no linked code, which is what keeps the MIT plugin",
+        "clear of this repository's AGPL). Tokens are validated as 8-32",
+        "lowercase hex before they reach Valkey, or the query string would be",
+        "a way to name arbitrary keys."
+    ],
+    "ProbeReportEnabled": true,
+
+    "_comment_valkey": [
+        "The label-correlation store, and the seam between the two programs: the",
+        "CoreDNS probe plugin writes label -> observation, this web tier reads.",
+        "Points at the existing Valkey HA cluster. Short TTLs, disposable state,",
+        "so this pod stays stateless -- do not set DatabasePath alongside it."
+    ],
+    "ValkeyURL": "",
+
+    "_comment_lookup": [
+        "Recursive resolver behind the /dns/{name}/{type} JSON lookup endpoint.",
+        "The plan calls for Unbound with `ede: yes` so Extended DNS Errors and the",
+        "AD bit are real rather than synthesised. Any validating resolver works",
+        "until that exists, but EDE readouts will be empty.",
+        "",
+        "SECURITY: never let this become an open 'look up anything' proxy -- that",
+        "is a reconnaissance relay and an amplification reflector using our IP.",
+        "Restrict names to hivre.com zones or a small curated allowlist and",
+        "validate the type against a short enum before this ships publicly."
+    ],
+    "LookupUpstream": "",
+
+    "_comment_lookup_zones": [
+        "REQUIRED whenever LookupUpstream is set — addrd refuses to start",
+        "otherwise, rather than defaulting to 'anything'. An unrestricted",
+        "lookup endpoint is an open resolver reachable over HTTP: a",
+        "reconnaissance proxy and an amplification reflector using our address",
+        "and reputation. Names outside these zones get 403 with a pointer to",
+        "dns.google / DNSViz."
+    ],
+    "LookupAllowedZones": ["hivre.com"],
+
+    "IPInfoBaseURL": "",
+    "TLSCertPath": "",
+    "TLSKeyPath": ""
+}
