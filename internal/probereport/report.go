@@ -59,8 +59,135 @@ type Observation struct {
 	Cookie         bool      `json:"cookie"`
 	ECS            bool      `json:"ecs"`
 	ECSScope       uint8     `json:"ecs_scope"`
-	CaseRandomized bool      `json:"case_randomized"`
-	Seen           int       `json:"seen"`
+	ECSFamily      uint16    `json:"ecs_family"`
+	ECSPrefix      string    `json:"ecs_prefix"`
+	CompactAware   bool      `json:"compact_aware"`
+	DELEGAware     bool      `json:"deleg_aware"`
+	// KeyTags are the DNSSEC key tags the resolver signalled (RFC 8145). Empty is
+	// "said nothing", not "holds none".
+	KeyTags []uint16 `json:"key_tags,omitempty"`
+	// KnowsZoneKey is meaningful only alongside a non-empty KeyTags.
+	KnowsZoneKey bool `json:"knows_zone_key,omitempty"`
+	// ZoneVersionAsked means the resolver asked which zone version answered
+	// (RFC 9660).
+	ZoneVersionAsked bool `json:"zoneversion_asked,omitempty"`
+	// TLS is the handshake detail when the query arrived encrypted (RFC 9539),
+	// nil for cleartext.
+	TLS            *TLSInfo `json:"tls,omitempty"`
+	CaseRandomized bool     `json:"case_randomized"`
+	Seen           int      `json:"seen"`
+}
+
+// TLSInfo mirrors the probe plugin's handshake detail for an encrypted query.
+type TLSInfo struct {
+	Version     string `json:"version,omitempty"`
+	CipherSuite string `json:"cipher_suite,omitempty"`
+	NamedGroup  string `json:"named_group,omitempty"`
+	ServerName  string `json:"server_name,omitempty"`
+	DidResume   bool   `json:"did_resume,omitempty"`
+}
+
+// Encrypted reports whether the query reached us over an encrypted transport
+// (RFC 9539). Derived from Transport rather than from TLS being non-nil, so it
+// stays correct if a transport is ever added that carries no handshake detail.
+func (o Observation) Encrypted() bool {
+	switch o.Transport {
+	case "tls", "quic", "https":
+		return true
+	default:
+		return false
+	}
+}
+
+// TrustAnchorReading is three-valued for the same reason DELEGReading is: a
+// resolver that signalled no key tags has NOT told us it lacks this zone's key.
+type TrustAnchorReading string
+
+const (
+	// TrustAnchorSilent means the resolver signalled no key tags at all. This is
+	// the overwhelmingly common case and says nothing about what it holds.
+	TrustAnchorSilent TrustAnchorReading = "silent"
+	// TrustAnchorOurs means this zone's key tag was among those signalled.
+	TrustAnchorOurs TrustAnchorReading = "holds-zone-key"
+	// TrustAnchorOther means tags were signalled but none was ours.
+	TrustAnchorOther TrustAnchorReading = "other-keys-only"
+)
+
+// TrustAnchorReading reports the RFC 8145 signal without turning silence into a
+// negative finding.
+func (o Observation) TrustAnchorReading() TrustAnchorReading {
+	switch {
+	case len(o.KeyTags) == 0:
+		return TrustAnchorSilent
+	case o.KnowsZoneKey:
+		return TrustAnchorOurs
+	default:
+		return TrustAnchorOther
+	}
+}
+
+// ECSDisclosure is the three-state reading of EDNS Client Subnet.
+//
+// Two states would be wrong, and wrong in the direction that matters: RFC 7871
+// §7.1.2 lets a resolver send the option with SOURCE PREFIX-LENGTH 0 to say
+// "deliberately disclosing nothing", which is the BEST outcome. Rendering that
+// the same as a disclosure would accuse the resolvers behaving well.
+type ECSDisclosure string
+
+const (
+	// ECSSilent means no option was sent. The resolver told us nothing, which is
+	// not the same as declining — it may simply not implement ECS.
+	ECSSilent ECSDisclosure = "silent"
+	// ECSDeclined means the option was sent with a zero prefix length: an
+	// explicit refusal to disclose.
+	ECSDeclined ECSDisclosure = "declined"
+	// ECSDisclosed means the resolver handed over some bits of the client
+	// address.
+	ECSDisclosed ECSDisclosure = "disclosed"
+)
+
+// ECSDisclosure collapses the ecs/ecs_scope pair into the reading a page should
+// show. Kept here rather than in the template so the distinction is testable and
+// cannot be re-flattened by whoever next edits the markup.
+func (o Observation) ECSDisclosure() ECSDisclosure {
+	switch {
+	case !o.ECS:
+		return ECSSilent
+	case o.ECSScope == 0:
+		return ECSDeclined
+	default:
+		return ECSDisclosed
+	}
+}
+
+// DELEGReading is a three-state answer too, for the same reason: a resolver that
+// sent no OPT record at all has not told us it is DELEG-unaware.
+type DELEGReading string
+
+const (
+	// DELEGUnknown means the query carried no EDNS, so the DE bit could not have
+	// been present either way. Absence of evidence.
+	DELEGUnknown DELEGReading = "unknown"
+	// DELEGUnaware means EDNS was present and the DE bit was not set.
+	DELEGUnaware DELEGReading = "unaware"
+	// DELEGAwareReading means the resolver set the DE bit.
+	DELEGAwareReading DELEGReading = "aware"
+)
+
+// DELEGReading reports DELEG-awareness without conflating "did not say" with
+// "said no".
+//
+// Note the underlying bit is a PROVISIONAL assignment in draft-ietf-deleg; see
+// the probe plugin's README before drawing conclusions from an aggregate.
+func (o Observation) DELEGReading() DELEGReading {
+	switch {
+	case !o.EDNS:
+		return DELEGUnknown
+	case o.DELEGAware:
+		return DELEGAwareReading
+	default:
+		return DELEGUnaware
+	}
 }
 
 // Report is the response body.
