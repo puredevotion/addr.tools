@@ -63,8 +63,67 @@ type Observation struct {
 	ECSPrefix      string    `json:"ecs_prefix"`
 	CompactAware   bool      `json:"compact_aware"`
 	DELEGAware     bool      `json:"deleg_aware"`
-	CaseRandomized bool      `json:"case_randomized"`
-	Seen           int       `json:"seen"`
+	// KeyTags are the DNSSEC key tags the resolver signalled (RFC 8145). Empty is
+	// "said nothing", not "holds none".
+	KeyTags []uint16 `json:"key_tags,omitempty"`
+	// KnowsZoneKey is meaningful only alongside a non-empty KeyTags.
+	KnowsZoneKey bool `json:"knows_zone_key,omitempty"`
+	// ZoneVersionAsked means the resolver asked which zone version answered
+	// (RFC 9660).
+	ZoneVersionAsked bool `json:"zoneversion_asked,omitempty"`
+	// TLS is the handshake detail when the query arrived encrypted (RFC 9539),
+	// nil for cleartext.
+	TLS            *TLSInfo `json:"tls,omitempty"`
+	CaseRandomized bool     `json:"case_randomized"`
+	Seen           int      `json:"seen"`
+}
+
+// TLSInfo mirrors the probe plugin's handshake detail for an encrypted query.
+type TLSInfo struct {
+	Version     string `json:"version,omitempty"`
+	CipherSuite string `json:"cipher_suite,omitempty"`
+	NamedGroup  string `json:"named_group,omitempty"`
+	ServerName  string `json:"server_name,omitempty"`
+	DidResume   bool   `json:"did_resume,omitempty"`
+}
+
+// Encrypted reports whether the query reached us over an encrypted transport
+// (RFC 9539). Derived from Transport rather than from TLS being non-nil, so it
+// stays correct if a transport is ever added that carries no handshake detail.
+func (o Observation) Encrypted() bool {
+	switch o.Transport {
+	case "tls", "quic", "https":
+		return true
+	default:
+		return false
+	}
+}
+
+// TrustAnchorReading is three-valued for the same reason DELEGReading is: a
+// resolver that signalled no key tags has NOT told us it lacks this zone's key.
+type TrustAnchorReading string
+
+const (
+	// TrustAnchorSilent means the resolver signalled no key tags at all. This is
+	// the overwhelmingly common case and says nothing about what it holds.
+	TrustAnchorSilent TrustAnchorReading = "silent"
+	// TrustAnchorOurs means this zone's key tag was among those signalled.
+	TrustAnchorOurs TrustAnchorReading = "holds-zone-key"
+	// TrustAnchorOther means tags were signalled but none was ours.
+	TrustAnchorOther TrustAnchorReading = "other-keys-only"
+)
+
+// TrustAnchorReading reports the RFC 8145 signal without turning silence into a
+// negative finding.
+func (o Observation) TrustAnchorReading() TrustAnchorReading {
+	switch {
+	case len(o.KeyTags) == 0:
+		return TrustAnchorSilent
+	case o.KnowsZoneKey:
+		return TrustAnchorOurs
+	default:
+		return TrustAnchorOther
+	}
 }
 
 // ECSDisclosure is the three-state reading of EDNS Client Subnet.

@@ -130,3 +130,88 @@ func TestNewFieldsDecodeFromPluginJSON(t *testing.T) {
 		t.Errorf("DELEGReading() = %q, want %q", got, DELEGAwareReading)
 	}
 }
+
+// TestTrustAnchorReadingDistinguishesSilence — RFC 8145 signals are rare, so the
+// common case is silence. Rendering that as "does not hold our key" would turn the
+// absence of a signal into a negative finding about the resolver.
+func TestTrustAnchorReadingDistinguishesSilence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		obs  Observation
+		want TrustAnchorReading
+	}{
+		{"no tags signalled", Observation{}, TrustAnchorSilent},
+		// Defensive: the flag cannot legitimately be set with no tags, and must
+		// not be believed if it is.
+		{"flag set but no tags", Observation{KnowsZoneKey: true}, TrustAnchorSilent},
+		{"tags, ours among them", Observation{KeyTags: []uint16{0x4444}, KnowsZoneKey: true}, TrustAnchorOurs},
+		{"tags, none ours", Observation{KeyTags: []uint16{0x0635}}, TrustAnchorOther},
+	} {
+		if got := tc.obs.TrustAnchorReading(); got != tc.want {
+			t.Errorf("%s: TrustAnchorReading() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestEncryptedFromTransport — derived from Transport rather than from TLS being
+// non-nil, so it stays correct for a transport that carries no handshake detail.
+func TestEncryptedFromTransport(t *testing.T) {
+	for transport, want := range map[string]bool{
+		"udp": false, "tcp": false, "": false,
+		"tls": true, "quic": true, "https": true,
+	} {
+		if got := (Observation{Transport: transport}).Encrypted(); got != want {
+			t.Errorf("transport %q: Encrypted() = %v, want %v", transport, got, want)
+		}
+	}
+	// A TLS transport with no detail block is still encrypted.
+	if !(Observation{Transport: "tls"}).Encrypted() {
+		t.Error("tls transport with nil TLS block read as cleartext")
+	}
+}
+
+// TestRFC8145And9539FieldsDecode pins the new JSON tags against what the plugin
+// writes. This struct is a hand-maintained mirror across two repositories, so a
+// tag typo is silent: the field stays zero and the page reports "silent" or
+// "cleartext" forever, which looks like a finding instead of a bug.
+func TestRFC8145And9539FieldsDecode(t *testing.T) {
+	raw := []byte(`{
+		"token":"deadbeef",
+		"transport":"tls",
+		"key_tags":[17476,1589],
+		"knows_zone_key":true,
+		"zoneversion_asked":true,
+		"tls":{"version":"TLS 1.3","cipher_suite":"TLS_AES_128_GCM_SHA256",
+		       "named_group":"X25519","did_resume":true}
+	}`)
+
+	var obs Observation
+	if err := json.Unmarshal(raw, &obs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(obs.KeyTags) != 2 || obs.KeyTags[0] != 17476 {
+		t.Errorf("KeyTags = %v, want [17476 1589] (tag: key_tags)", obs.KeyTags)
+	}
+	if !obs.KnowsZoneKey {
+		t.Error("KnowsZoneKey = false (tag: knows_zone_key)")
+	}
+	if !obs.ZoneVersionAsked {
+		t.Error("ZoneVersionAsked = false (tag: zoneversion_asked)")
+	}
+	if obs.TLS == nil {
+		t.Fatal("TLS = nil (tag: tls)")
+	}
+	if obs.TLS.NamedGroup != "X25519" {
+		t.Errorf("TLS.NamedGroup = %q, want X25519", obs.TLS.NamedGroup)
+	}
+	if !obs.TLS.DidResume {
+		t.Error("TLS.DidResume = false (tag: did_resume)")
+	}
+	if !obs.Encrypted() {
+		t.Error("Encrypted() = false for transport tls")
+	}
+	if got := obs.TrustAnchorReading(); got != TrustAnchorOurs {
+		t.Errorf("TrustAnchorReading() = %q, want %q", got, TrustAnchorOurs)
+	}
+}
