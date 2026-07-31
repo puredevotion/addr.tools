@@ -59,8 +59,76 @@ type Observation struct {
 	Cookie         bool      `json:"cookie"`
 	ECS            bool      `json:"ecs"`
 	ECSScope       uint8     `json:"ecs_scope"`
+	ECSFamily      uint16    `json:"ecs_family"`
+	ECSPrefix      string    `json:"ecs_prefix"`
+	CompactAware   bool      `json:"compact_aware"`
+	DELEGAware     bool      `json:"deleg_aware"`
 	CaseRandomized bool      `json:"case_randomized"`
 	Seen           int       `json:"seen"`
+}
+
+// ECSDisclosure is the three-state reading of EDNS Client Subnet.
+//
+// Two states would be wrong, and wrong in the direction that matters: RFC 7871
+// §7.1.2 lets a resolver send the option with SOURCE PREFIX-LENGTH 0 to say
+// "deliberately disclosing nothing", which is the BEST outcome. Rendering that
+// the same as a disclosure would accuse the resolvers behaving well.
+type ECSDisclosure string
+
+const (
+	// ECSSilent means no option was sent. The resolver told us nothing, which is
+	// not the same as declining — it may simply not implement ECS.
+	ECSSilent ECSDisclosure = "silent"
+	// ECSDeclined means the option was sent with a zero prefix length: an
+	// explicit refusal to disclose.
+	ECSDeclined ECSDisclosure = "declined"
+	// ECSDisclosed means the resolver handed over some bits of the client
+	// address.
+	ECSDisclosed ECSDisclosure = "disclosed"
+)
+
+// ECSDisclosure collapses the ecs/ecs_scope pair into the reading a page should
+// show. Kept here rather than in the template so the distinction is testable and
+// cannot be re-flattened by whoever next edits the markup.
+func (o Observation) ECSDisclosure() ECSDisclosure {
+	switch {
+	case !o.ECS:
+		return ECSSilent
+	case o.ECSScope == 0:
+		return ECSDeclined
+	default:
+		return ECSDisclosed
+	}
+}
+
+// DELEGReading is a three-state answer too, for the same reason: a resolver that
+// sent no OPT record at all has not told us it is DELEG-unaware.
+type DELEGReading string
+
+const (
+	// DELEGUnknown means the query carried no EDNS, so the DE bit could not have
+	// been present either way. Absence of evidence.
+	DELEGUnknown DELEGReading = "unknown"
+	// DELEGUnaware means EDNS was present and the DE bit was not set.
+	DELEGUnaware DELEGReading = "unaware"
+	// DELEGAwareReading means the resolver set the DE bit.
+	DELEGAwareReading DELEGReading = "aware"
+)
+
+// DELEGReading reports DELEG-awareness without conflating "did not say" with
+// "said no".
+//
+// Note the underlying bit is a PROVISIONAL assignment in draft-ietf-deleg; see
+// the probe plugin's README before drawing conclusions from an aggregate.
+func (o Observation) DELEGReading() DELEGReading {
+	switch {
+	case !o.EDNS:
+		return DELEGUnknown
+	case o.DELEGAware:
+		return DELEGAwareReading
+	default:
+		return DELEGUnaware
+	}
 }
 
 // Report is the response body.
