@@ -21,6 +21,7 @@ import (
 	"github.com/brianshea2/addr.tools/internal/httputil"
 	"github.com/brianshea2/addr.tools/internal/netutil"
 	"github.com/brianshea2/addr.tools/internal/probereport"
+	"github.com/brianshea2/addr.tools/internal/probewatch"
 	"github.com/brianshea2/addr.tools/internal/status"
 	"github.com/brianshea2/addr.tools/internal/ttlstore"
 	"github.com/brianshea2/addr.tools/internal/zones/challenges"
@@ -58,7 +59,15 @@ type Config struct {
 	// visitor's resolver did using observations the CoreDNS probe plugin wrote
 	// to Valkey. Requires ValkeyURL — that key space is the only thing the two
 	// programs share.
-	ProbeReportEnabled    bool
+	// It also registers the websocket at /watch/{watcher}, fed from the same
+	// Valkey key space (internal/probewatch). Both are views of one store, so one
+	// flag governs both: enabling the polling read while leaving the live feed off
+	// would only ever be a way to half-configure the same feature.
+	ProbeReportEnabled bool
+	// ProbeZone is the probe plugin's zone, e.g. "check.hivre.com". Used only to
+	// reconstruct a display query name for the /watch feed, since the plugin
+	// records the properties of a query rather than its name. Optional.
+	ProbeZone             string
 	MyaddrTurnstileSecret string
 	DnscheckZones         []struct {
 		*dnscheck.DnscheckHandler
@@ -155,6 +164,25 @@ func (config *Config) Run() {
 			Store: &probereport.Store{Client: valkeyClient},
 		})
 		log.Print("[info] serving /api/report from valkey")
+
+		// The live feed the SPA actually consumes. Upstream registers
+		// /watch/{watcher} only inside the `len(config.DnscheckZones) > 0` block
+		// below, because there it is fed by this process's own DNS handler. This
+		// fork serves no DNS, so that block never runs and the endpoint the SPA
+		// opens on page load did not exist. probewatch.Hub supplies the missing
+		// publisher by tailing Valkey, and wraps SimpleWatcherHub rather than
+		// replacing it so the websocket handler and its JSON encoding stay
+		// upstream's — the SPA needs no change at all.
+		probeHub := &probewatch.Hub{
+			Inner:  &dnscheck.SimpleWatcherHub{MaxSize: MaxDnscheckWatchers},
+			Client: valkeyClient,
+			Zone:   config.ProbeZone,
+		}
+		http.Handle("/watch/{watcher}", dnscheck.NewWebsocketHandler(probeHub))
+		statusHandler.Add(status.StatusProviderFunc(func() []status.Status {
+			return []status.Status{{Title: "probe watchers", Value: strconv.Itoa(probeHub.Tails())}}
+		}))
+		log.Print("[info] serving /watch/{watcher} from valkey")
 	}
 
 	// init persistent data store
