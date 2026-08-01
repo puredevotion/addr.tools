@@ -312,10 +312,20 @@ jobs:
             https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
           git -C /tmp/opengrep-rules checkout --quiet "${OPENGREP_RULES_SHA}"
       - name: Static analysis (Opengrep)
+        # SCOPED to fork-owned packages, for the same reason and by the same rule
+        # as the golangci-lint job: upstream's tree produces 12 findings across 9
+        # files we did not write and cannot fix without maximising rebase conflict
+        # against the upstream this fork tracks. Not one of them is in
+        # odoh/probewatch/probereport.
+        #
+        # Same discipline applies: this list stays at zero, and is widened when a
+        # package is adopted, never narrowed to make a finding disappear.
         env:
           PYTHONUTF8: "1"
           LC_ALL: "C.UTF-8"
-        run: opengrep scan -f /tmp/opengrep-rules/go --error .
+        run: |
+          opengrep scan -f /tmp/opengrep-rules/go --error \
+            internal/odoh internal/probewatch internal/probereport
 
   build:
     # The counterpart to coredns-plugins' `containerize` job: prove the thing this
