@@ -328,13 +328,13 @@ func TestParseConfigsSkipsUnknownVersions(t *testing.T) {
 	future := []byte{}
 	future = binary.BigEndian.AppendUint16(future, 0x0002)
 	body := bytes.Repeat([]byte{0xcc}, 12)
-	future = binary.BigEndian.AppendUint16(future, uint16(len(body)))
+	future = binary.BigEndian.AppendUint16(future, wireLen(len(body)))
 	future = append(future, body...)
 
 	t.Run("unknown first", func(t *testing.T) {
 		inner := append(bytes.Clone(future), known...)
 		var wire []byte
-		wire = binary.BigEndian.AppendUint16(wire, uint16(len(inner)))
+		wire = binary.BigEndian.AppendUint16(wire, wireLen(len(inner)))
 		wire = append(wire, inner...)
 
 		cfg, err := ParseConfigs(wire)
@@ -348,7 +348,7 @@ func TestParseConfigsSkipsUnknownVersions(t *testing.T) {
 
 	t.Run("only unknown versions", func(t *testing.T) {
 		var wire []byte
-		wire = binary.BigEndian.AppendUint16(wire, uint16(len(future)))
+		wire = binary.BigEndian.AppendUint16(wire, wireLen(len(future)))
 		wire = append(wire, future...)
 		if _, err := ParseConfigs(wire); !errors.Is(err, ErrUnsupportedSuite) {
 			t.Errorf("err = %v, want ErrUnsupportedSuite", err)

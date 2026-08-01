@@ -82,7 +82,7 @@ type Hub struct {
 	fetchFn func(ctx context.Context, token string, cursor int64) ([]probereport.Observation, int, error)
 
 	mu    sync.Mutex
-	tails map[string]context.CancelFunc
+	tails map[string]chan struct{}
 }
 
 func (h *Hub) Get(watcherId string) dnscheck.Watcher { return h.Inner.Get(watcherId) }
@@ -98,30 +98,36 @@ func (h *Hub) Register(watcherId string, watcher dnscheck.Watcher) error {
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// A stop channel rather than a cancellable context. The tail's lifetime is
+	// owned by Register/Unregister, not by a deadline or a caller's request
+	// scope, and a context whose cancel func escapes the function that made it is
+	// both harder to reason about and flagged by gosec G118 for exactly that
+	// reason. Closing a channel says "this one is finished" with no ambiguity
+	// about who is responsible for calling what.
+	stop := make(chan struct{})
 
 	h.mu.Lock()
 	if h.tails == nil {
-		h.tails = make(map[string]context.CancelFunc)
+		h.tails = make(map[string]chan struct{})
 	}
 	// Registering an id that already has a tail should be impossible — the
 	// handler checks IsRegistered first — but if it happens, stop the old one
 	// rather than orphaning it.
 	if old, exists := h.tails[watcherId]; exists {
-		old()
+		close(old)
 	}
-	h.tails[watcherId] = cancel
+	h.tails[watcherId] = stop
 	h.mu.Unlock()
 
-	go h.tail(ctx, watcherId, watcher)
+	go h.tail(stop, watcherId, watcher)
 	return nil
 }
 
 // Unregister stops the tail and unregisters the watcher.
 func (h *Hub) Unregister(watcherId string) {
 	h.mu.Lock()
-	if cancel, exists := h.tails[watcherId]; exists {
-		cancel()
+	if stop, exists := h.tails[watcherId]; exists {
+		close(stop)
 		delete(h.tails, watcherId)
 	}
 	h.mu.Unlock()
@@ -149,19 +155,33 @@ func (h *Hub) interval() time.Duration {
 // keeps the tail idempotent under a missed tick and stops it re-sending the
 // backlog on every poll, which would show the SPA the same query repeatedly and
 // inflate its query counter.
-func (h *Hub) tail(ctx context.Context, token string, watcher dnscheck.Watcher) {
+func (h *Hub) tail(stop <-chan struct{}, token string, watcher dnscheck.Watcher) {
 	ticker := time.NewTicker(h.interval())
 	defer ticker.Stop()
 
 	cursor := int64(0)
 	for {
+		// Checked FIRST and non-blocking, before any work. The wait select at the
+		// bottom is not sufficient on its own: `select` chooses UNIFORMLY AT RANDOM
+		// between ready cases, so once the ticker and stop are both ready it will
+		// keep choosing another poll roughly half the time. That made shutdown
+		// probabilistic rather than prompt — caught by a test asserting polling
+		// actually ceases, not by the race detector.
+		select {
+		case <-stop:
+			return
+		default:
+		}
+
 		// Poll immediately on entry: the SPA fires its first queries as soon as
 		// the socket opens, and waiting a full interval first would make the
 		// page look dead for no reason.
-		obs, consumed, err := h.read(ctx, token, cursor)
+		obs, consumed, err := h.read(context.Background(), token, cursor)
 		if err != nil {
-			if ctx.Err() != nil {
+			select {
+			case <-stop:
 				return
+			default:
 			}
 			// A store hiccup degrades liveness; it must not kill the tail, or a
 			// single blip would leave the page silent until reload.
@@ -177,7 +197,7 @@ func (h *Hub) tail(ctx context.Context, token string, watcher dnscheck.Watcher) 
 		}
 
 		select {
-		case <-ctx.Done():
+		case <-stop:
 			return
 		case <-ticker.C:
 		}

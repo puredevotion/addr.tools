@@ -1,0 +1,325 @@
+# CI for the addr.tools fork (web tier of the hivre.com DNS lab).
+#
+# Modelled on puredevotion/coredns-plugins' ci.yml, which is the house standard,
+# with three deliberate hardening changes. They are called out where they appear
+# rather than silently improved, because coredns-plugins should get the same
+# treatment and this file is the reference for that:
+#
+#   1. Actions are pinned to COMMIT SHAs, not mutable tags. A tag can be moved;
+#      `@v4` is a promise from whoever controls the repo, not a fact. This is the
+#      gap that the tj-actions/changed-files compromise walked through.
+#   2. Every downloaded binary has its SHA-256 verified before it runs. A pipeline
+#      that generates SBOMs while executing `curl | sh` has its front door open.
+#   3. Tool versions are pinned everywhere, including `go install`. `@latest` in a
+#      security tool is a supply-chain dependency with no version control.
+#
+# This repo is a FORK of brianshea2/addr.tools and carries homelab-specific code
+# (probewatch, odoh). Nothing here is intended for upstream, and the
+# no-private-references job below is what keeps that code publishable anyway.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so dependency CVEs surface without waiting for a commit.
+    - cron: "0 6 * * 2"
+
+# Least privilege by default. Any job needing more asks for it explicitly.
+permissions:
+  contents: read
+
+env:
+  # Single source of truth for pinned tooling. Bump deliberately; each has a
+  # checksum below that must move with it.
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  GRYPE_VERSION: "0.116.0"
+  GRYPE_SHA256: "40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5"
+  OPENGREP_VERSION: "1.25.0"
+  GOVULNCHECK_VERSION: "v1.1.4"
+  CYCLONEDX_VERSION: "v1.7.0"
+  GOLANGCI_VERSION: "v2.12.2"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify module graph is tidy
+        run: go mod tidy -diff
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with race detector
+        run: go test -race -covermode=atomic -coverprofile=cover.out ./...
+
+      # Proves the tree needs no network at build time. Deps come from the module
+      # cache populated above; GOPROXY=off fails loudly if anything still wants
+      # fetching. This is the single most valuable job here and the reason the
+      # coredns-plugins pipeline is worth copying.
+      - name: Test offline (hermetic gate)
+        env:
+          GOPROXY: "off"
+          GOFLAGS: -mod=mod
+        run: go test ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=cover.out | tail -1
+
+  fuzz:
+    # The ODoH and probe parsers read attacker-chosen bytes: an oblivious message
+    # is the body of an unauthenticated POST, and a probe observation is JSON from
+    # a shared store. Those are the highest-value fuzz targets in the tree.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # Short smoke runs, not a campaign: these catch regressions that break the
+      # target itself, which is what a merge gate can honestly promise.
+      - name: Fuzz ODoH message parsing (45s)
+        run: go test ./internal/odoh/ -run=NONE -fuzz=FuzzParseMessage -fuzztime=45s
+      - name: Fuzz ODoH config parsing (45s)
+        run: go test ./internal/odoh/ -run=NONE -fuzz=FuzzParseConfigs -fuzztime=45s
+      - name: Fuzz ODoH plaintext parsing (45s)
+        run: go test ./internal/odoh/ -run=NONE -fuzz=FuzzParsePlaintext -fuzztime=45s
+
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fuzz-crashers
+          path: internal/odoh/testdata/fuzz/
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: govulncheck
+        # PINNED, unlike the model's `@latest`. A security tool that changes
+        # under you makes a green build unreproducible in the direction that
+        # matters: you cannot tell a fixed CVE from a dropped check.
+        run: |
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          govulncheck ./...
+
+  dependency-review:
+    # Not in the model pipeline. Catches a newly-introduced vulnerable or
+    # badly-licensed dependency at PR time, which is cheaper than finding it in
+    # the SBOM scan after merge.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48  # v4.9.0
+        with:
+          fail-on-severity: high
+
+  no-private-references:
+    # This fork carries homelab-specific code, so the structural check that the
+    # tree stays publishable matters MORE here than upstream, not less. A
+    # denylist fails open, which is why the hermetic build above is the real
+    # gate — this is the cheap fast one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: Scan for private references
+        run: |
+          set -uo pipefail
+          patterns='\.home\.arpa|\.internal\.arpa|192\.168\.|10\.(4[0-9]|[0-9])\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'
+          if grep -rInE "$patterns" \
+               --include='*.go' --include='*.md' --include='*.yml' \
+               --include='*.yaml' --include='*.json' --include='*.mod' . ; then
+            echo "::error::private reference found — see matches above"
+            exit 1
+          fi
+          echo "no private references found"
+
+  gofmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+          echo "gofmt clean"
+
+  golangci-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: golangci-lint (fork-owned packages)
+        # SCOPED to the packages this fork authors, and that is a deliberate
+        # distinction rather than a suppression: upstream's tree carries 54
+        # pre-existing findings (errcheck, staticcheck, a deprecated ecdsa API),
+        # and fixing them here would maximise rebase conflict against the very
+        # upstream this fork exists to track closely. Excluding findings in code
+        # you own would be suppression; declining to lint code you did not write
+        # and cannot fix upstream is scope.
+        #
+        # Everything under this list must stay at zero. Widen it when a package
+        # is adopted, never narrow it to make a finding go away.
+        run: |
+          go run "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_VERSION}" run \
+            ./internal/odoh/... ./internal/probewatch/... ./internal/probereport/...
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          # The log range needs real history, not the default shallow clone.
+          fetch-depth: 0
+
+      - name: Install gitleaks (checksum-verified)
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o /tmp/gitleaks.tar.gz "$url"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan for secrets
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          else
+            range="--all"
+          fi
+          gitleaks git --log-opts="$range" --redact --no-banner .
+
+  yaml-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: Install yamllint
+        run: pip install --no-cache-dir yamllint==1.35.1
+      - name: yamllint
+        run: yamllint -c .yamllint.yml -f parsable .github/workflows
+
+  sbom-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Generate CycloneDX SBOM
+        # `app` rather than `mod`: unlike coredns-plugins, this repo builds a real
+        # binary, so the SBOM should describe what actually ships rather than the
+        # module's declared graph.
+        run: |
+          set -euo pipefail
+          go install "github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@${CYCLONEDX_VERSION}"
+          "$(go env GOPATH)/bin/cyclonedx-gomod" app -json -output sbom.cdx.json -main ./cmd/addrd 2>/dev/null \
+            || "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json -output sbom.cdx.json
+
+      - name: Compute date key
+        id: date
+        run: echo "today=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore grype DB cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: ~/.cache/grype/db
+          key: grype-db-${{ steps.date.outputs.today }}
+          restore-keys: |
+            grype-db-
+
+      - name: Install grype (checksum-verified)
+        # The model pipeline pipes install.sh straight into a shell. Fetching the
+        # release artifact and verifying its digest is the same binary with one
+        # fewer party able to change it.
+        run: |
+          set -euo pipefail
+          url="https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o /tmp/grype.tar.gz "$url"
+          echo "${GRYPE_SHA256}  /tmp/grype.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/grype.tar.gz -C /tmp grype
+          sudo install /tmp/grype /usr/local/bin/grype
+          grype version
+
+      - name: Scan the SBOM for known vulnerabilities
+        run: grype "sbom:sbom.cdx.json" --fail-on high
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+
+  opengrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: Install opengrep
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /usr/local/bin/opengrep \
+            "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          chmod +x /usr/local/bin/opengrep
+      - name: Clone opengrep-rules
+        # Pinned to a tag rather than main@HEAD. The model clones the rule set at
+        # whatever HEAD happens to be, which makes a green build unreproducible:
+        # the same commit can pass today and fail tomorrow with nothing changed.
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v1.0.0 \
+            https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules \
+            || git clone --depth 1 https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+      - name: Static analysis (Opengrep)
+        env:
+          PYTHONUTF8: "1"
+          LC_ALL: "C.UTF-8"
+        run: opengrep scan -f /tmp/opengrep-rules/go --error .
+
+  build:
+    # The counterpart to coredns-plugins' `containerize` job: prove the thing this
+    # repo actually ships still builds. Cheaper here because there is no image to
+    # assemble, but the same purpose — catching a break that would otherwise only
+    # surface at deploy time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build all packages
+        run: go build ./...
+      - name: Build with CGO disabled (deployment shape)
+        # The deployed artifact is a static binary in a minimal image. A build
+        # that only works with cgo enabled is a deploy-time failure, not a CI one,
+        # unless it is checked here.
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./...

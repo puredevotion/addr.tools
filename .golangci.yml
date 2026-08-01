@@ -1,0 +1,30 @@
+# golangci-lint config, shared shape across every Go repo in this ecosystem
+# (dafs's ci/ module, homelab's ci/dagger + experiments/ra-dnr) — one
+# consistent lint/SAST bar regardless of which repo is public.
+#
+# v2 schema (migrated from v1 via `golangci-lint migrate` — no v1.x release
+# builds against Go 1.26, so staying on v1 stopped being an option once
+# go.mod's toolchain moved past 1.24, see ci.yml's golangci-lint step
+# comment). v2's default-enabled set already covers govet, staticcheck
+# (which absorbed gosimple/stylecheck) and errcheck, previously listed here
+# explicitly under v1 — only gosec still needs enabling, it's the one that
+# actually closes the Go-SAST gap (hardcoded credentials, weak crypto,
+# command injection via unsanitized exec.Command args, etc.) and isn't on
+# by default in either schema version.
+version: "2"
+linters:
+  enable:
+    - gosec
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

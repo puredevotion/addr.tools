@@ -42,6 +42,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // Suite identifiers from RFC 9180's registries. Only the mandatory-to-implement
@@ -94,6 +95,41 @@ type ConfigContents struct {
 	PublicKey []byte
 }
 
+// maxField is the largest value any length prefix in RFC 9230's wire format can
+// express. Every opaque field is `<..2^16-1>`.
+const maxField = math.MaxUint16
+
+// checkField rejects a value too large for a 16-bit length prefix.
+//
+// Called at the PUBLIC ENTRY POINTS rather than inside Marshal, which is the
+// distinction that matters: a length prefix disagreeing with its own contents is
+// precisely what every parser in this package treats as an attack, so emitting one
+// is not an option — and a Marshal that could fail would have to return an error
+// from thirteen call sites to say something the caller could have been told once,
+// up front, where it can still do something about it.
+func checkField(n int, what string) error {
+	if n > maxField {
+		return fmt.Errorf("odoh: %s is %d bytes, which exceeds the %d-byte wire limit", what, n, maxField)
+	}
+	return nil
+}
+
+// wireLen converts a length that checkField has already validated.
+//
+// The bound is restated rather than assumed: it is unreachable given the entry-point
+// checks, and it is here so that it STAYS unreachable if a new caller appears. If it
+// ever did trip, truncating is still better than wrapping — a short prefix fails the
+// receiver's framing check loudly, where a wrapped one silently reframes the message.
+func wireLen(n int) uint16 {
+	if n < 0 {
+		return 0
+	}
+	if n > maxField {
+		return maxField
+	}
+	return uint16(n)
+}
+
 // Marshal encodes ConfigContents. This exact byte string is the input to the key
 // ID derivation, so its encoding is part of the protocol rather than an internal
 // detail — a client and target that encode it differently derive different key IDs
@@ -103,7 +139,7 @@ func (c ConfigContents) Marshal() []byte {
 	b = binary.BigEndian.AppendUint16(b, c.KEMID)
 	b = binary.BigEndian.AppendUint16(b, c.KDFID)
 	b = binary.BigEndian.AppendUint16(b, c.AEADID)
-	b = binary.BigEndian.AppendUint16(b, uint16(len(c.PublicKey)))
+	b = binary.BigEndian.AppendUint16(b, wireLen(len(c.PublicKey)))
 	return append(b, c.PublicKey...)
 }
 
@@ -134,7 +170,7 @@ func (c ConfigContents) MarshalConfig() []byte {
 	contents := c.Marshal()
 	var b []byte
 	b = binary.BigEndian.AppendUint16(b, ConfigVersion)
-	b = binary.BigEndian.AppendUint16(b, uint16(len(contents)))
+	b = binary.BigEndian.AppendUint16(b, wireLen(len(contents)))
 	return append(b, contents...)
 }
 
@@ -143,7 +179,7 @@ func (c ConfigContents) MarshalConfig() []byte {
 func (c ConfigContents) MarshalConfigs() []byte {
 	cfg := c.MarshalConfig()
 	var b []byte
-	b = binary.BigEndian.AppendUint16(b, uint16(len(cfg)))
+	b = binary.BigEndian.AppendUint16(b, wireLen(len(cfg)))
 	return append(b, cfg...)
 }
 
@@ -225,9 +261,9 @@ type Message struct {
 // Marshal encodes a Message.
 func (m Message) Marshal() []byte {
 	b := []byte{m.Type}
-	b = binary.BigEndian.AppendUint16(b, uint16(len(m.KeyID)))
+	b = binary.BigEndian.AppendUint16(b, wireLen(len(m.KeyID)))
 	b = append(b, m.KeyID...)
-	b = binary.BigEndian.AppendUint16(b, uint16(len(m.Encrypted)))
+	b = binary.BigEndian.AppendUint16(b, wireLen(len(m.Encrypted)))
 	return append(b, m.Encrypted...)
 }
 
@@ -282,9 +318,9 @@ type Plaintext struct {
 // Marshal encodes a Plaintext.
 func (p Plaintext) Marshal() []byte {
 	var b []byte
-	b = binary.BigEndian.AppendUint16(b, uint16(len(p.DNSMessage)))
+	b = binary.BigEndian.AppendUint16(b, wireLen(len(p.DNSMessage)))
 	b = append(b, p.DNSMessage...)
-	b = binary.BigEndian.AppendUint16(b, uint16(len(p.Padding)))
+	b = binary.BigEndian.AppendUint16(b, wireLen(len(p.Padding)))
 	return append(b, p.Padding...)
 }
 
@@ -435,6 +471,13 @@ func (t *Target) EncryptResponse(qc *QueryContext, dnsResponse, padding []byte) 
 	if qc == nil || qc.recipient == nil {
 		return Message{}, errors.New("odoh: nil query context")
 	}
+	if err := checkField(len(dnsResponse), "dns response"); err != nil {
+		return Message{}, err
+	}
+	if err := checkField(len(padding), "response padding"); err != nil {
+		return Message{}, err
+	}
+
 	respNonce := make([]byte, respNonceLen)
 	if _, err := rand.Read(respNonce); err != nil {
 		return Message{}, fmt.Errorf("odoh: generating response nonce: %w", err)
