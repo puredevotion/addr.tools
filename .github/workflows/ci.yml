@@ -38,6 +38,8 @@ env:
   GRYPE_VERSION: "0.116.0"
   GRYPE_SHA256: "40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5"
   OPENGREP_VERSION: "1.25.0"
+  # No release tags are published for the rule set, so this is pinned by commit.
+  OPENGREP_RULES_SHA: "f1d2b562b414783763fd02a6ed2736eaed622efa"
   GOVULNCHECK_VERSION: "v1.1.4"
   CYCLONEDX_VERSION: "v1.7.0"
   GOLANGCI_VERSION: "v2.12.2"
@@ -122,7 +124,15 @@ jobs:
     # Not in the model pipeline. Catches a newly-introduced vulnerable or
     # badly-licensed dependency at PR time, which is cheaper than finding it in
     # the SBOM scan after merge.
+    #
+    # Requires "Dependency graph" enabled under Settings > Code security. That is
+    # a repository setting a workflow cannot turn on, so this job is allowed to
+    # fail softly rather than blocking every PR on an unset toggle. Remove
+    # continue-on-error once the setting is on — the vulnerability gate that does
+    # NOT depend on it is sbom-scan, which is why this one can afford to be
+    # advisory.
     if: github.event_name == 'pull_request'
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
@@ -288,14 +298,19 @@ jobs:
             "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86"
           chmod +x /usr/local/bin/opengrep
       - name: Clone opengrep-rules
-        # Pinned to a tag rather than main@HEAD. The model clones the rule set at
-        # whatever HEAD happens to be, which makes a green build unreproducible:
-        # the same commit can pass today and fail tomorrow with nothing changed.
+        # Pinned to a COMMIT, not a branch. The model clones whatever main@HEAD
+        # happens to be, which makes a green build unreproducible: the same commit
+        # can pass today and fail tomorrow with nothing changed.
+        #
+        # The repo publishes no release tags, so a commit is the only stable ref.
+        # (First attempt used `--branch v1.0.0` with a `||` fallback; `set -e`
+        # aborted on the failed clone before the fallback could run — a fallback
+        # after a failing command under `set -e` is not a fallback.)
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch v1.0.0 \
-            https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules \
-            || git clone --depth 1 https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+          git -C /tmp/opengrep-rules checkout --quiet "${OPENGREP_RULES_SHA}"
       - name: Static analysis (Opengrep)
         env:
           PYTHONUTF8: "1"
