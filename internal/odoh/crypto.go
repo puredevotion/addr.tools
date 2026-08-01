@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 // The RFC 9230 label strings and AAD constructions, isolated here because every
@@ -28,6 +29,26 @@ const (
 	x25519EncLen = 32
 )
 
+// aadLen renders a length into the two bytes the AAD format uses, saturating at
+// the maximum rather than wrapping.
+//
+// Saturation is safe HERE and nowhere else in this package: the AAD is
+// authenticated data, not a parsed length prefix, so both sides compute it from
+// values they already hold. A key ID or nonce long enough to overflow could only
+// come from our own code, and a wrapped length would silently produce an AAD that
+// authenticates something other than what was sent. Callers pass fixed-size values
+// (32-byte key IDs, 16-byte nonces), so the bound is unreachable in practice and
+// exists so it cannot become reachable unnoticed.
+func aadLen(n int) uint16 {
+	if n < 0 {
+		return 0
+	}
+	if n > math.MaxUint16 {
+		return math.MaxUint16
+	}
+	return uint16(n)
+}
+
 // queryAAD is RFC 9230 §6.2's `aad = 0x01 || len(key_id) || key_id`.
 //
 // The length is two bytes, matching the wire encoding of the same field. A
@@ -35,14 +56,14 @@ const (
 // that no other implementation computes.
 func queryAAD(keyID []byte) []byte {
 	b := []byte{MessageTypeQuery}
-	b = binary.BigEndian.AppendUint16(b, uint16(len(keyID)))
+	b = binary.BigEndian.AppendUint16(b, aadLen(len(keyID)))
 	return append(b, keyID...)
 }
 
 // responseAAD is RFC 9230 §6.2's `aad = 0x02 || len(resp_nonce) || resp_nonce`.
 func responseAAD(respNonce []byte) []byte {
 	b := []byte{MessageTypeResponse}
-	b = binary.BigEndian.AppendUint16(b, uint16(len(respNonce)))
+	b = binary.BigEndian.AppendUint16(b, aadLen(len(respNonce)))
 	return append(b, respNonce...)
 }
 
@@ -71,7 +92,7 @@ func deriveResponseSecrets(ctx exporter, queryPlain, respNonce []byte) (key, non
 
 	salt := make([]byte, 0, len(queryPlain)+2+len(respNonce))
 	salt = append(salt, queryPlain...)
-	salt = binary.BigEndian.AppendUint16(salt, uint16(len(respNonce)))
+	salt = binary.BigEndian.AppendUint16(salt, aadLen(len(respNonce)))
 	salt = append(salt, respNonce...)
 
 	// Note the argument order against the spec's Extract(salt, secret).

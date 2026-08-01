@@ -402,7 +402,7 @@ func (h *DnscheckHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 			for _, rr := range rrs {
 				if rr.Header().Rrtype == dns.TypeHTTPS {
 					https := rr.(*dns.HTTPS)
-					resp.Answer = append(resp.Answer, &dns.HTTPS{dns.SVCB{
+					resp.Answer = append(resp.Answer, &dns.HTTPS{SVCB: dns.SVCB{
 						Hdr: dns.RR_Header{
 							Name:   q.Name,
 							Rrtype: dns.TypeHTTPS,

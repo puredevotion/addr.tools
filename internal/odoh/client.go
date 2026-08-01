@@ -57,6 +57,12 @@ func (c *Client) EncryptQuery(dnsQuery, padding []byte) (Message, *PendingQuery,
 	if len(dnsQuery) == 0 {
 		return Message{}, nil, fmt.Errorf("%w: empty dns query", ErrMalformed)
 	}
+	if err := checkField(len(dnsQuery), "dns query"); err != nil {
+		return Message{}, nil, err
+	}
+	if err := checkField(len(padding), "query padding"); err != nil {
+		return Message{}, nil, err
+	}
 	pub, err := ecdh.X25519().NewPublicKey(c.config.PublicKey)
 	if err != nil {
 		return Message{}, nil, fmt.Errorf("odoh: target public key: %w", err)
