@@ -14,12 +14,23 @@
 // legitimate finding (a resolver that never reached us at all), so nothing
 // would look broken.
 //
-//	probe:seen:<token>  counter, incremented once per query
-//	probe:obs:<token>   list of JSON observations, capped
+//	probe:seen:<token>     counter, incremented once per query
+//	probe:obs:<token>      list of JSON observations, capped
+//	probe:reports:<token>  list of JSON RFC 9567 error reports, capped
 //
 // The counter is separate from the list because the list is capped: past the
 // cap the count keeps rising, and "your resolver asked 200 times" is itself
 // worth reporting.
+//
+// The reports key is a third, independent list rather than part of the
+// observation stream, because a report arrives on its own schedule: a resolver
+// reports after it has given up, and may hold the report query in its cache for
+// a TTL before repeating it. A report therefore routinely outlives the
+// observations for the same token, and folding the two together would tie its
+// retention to a visitor who has already left.
+//
+// The plugin also keeps a `probe:reports:unattributed` list for reports whose
+// name carried no token. That one is deliberately NOT read here — see Get.
 package probereport
 
 import (
@@ -190,6 +201,35 @@ func (o Observation) DELEGReading() DELEGReading {
 	}
 }
 
+// ErrorReport mirrors one RFC 9567 DNS error report as the probe plugin wrote
+// it: a resolver telling us, out of band, that it could not resolve one of our
+// names and what stopped it.
+//
+// The interesting field is EDE read against the name that failed. The probe zone
+// breaks names in specific, labelled ways, so `_expiredsig...` reported as EDE 7
+// (Signature Expired) means the resolver diagnosed correctly, while the same
+// name reported as EDE 6 (DNSSEC Bogus) means it noticed but could not say why.
+type ErrorReport struct {
+	// At is when the report reached the authoritative server, NOT when the
+	// failure happened. The gap can be minutes.
+	At time.Time `json:"at"`
+	// Qtype and Qname are what the resolver says it was trying to resolve.
+	Qtype     uint16 `json:"qtype"`
+	QtypeName string `json:"qtype_name"`
+	Qname     string `json:"qname"`
+	// EDE is the RFC 8914 extended error code the resolver concluded.
+	EDE uint16 `json:"ede"`
+	// EDEText is the registered description, empty for codes the plugin's build
+	// did not know. Empty is not an error: the registry grows.
+	EDEText string `json:"ede_text,omitempty"`
+	// ReporterAddr is the resolver that sent the REPORT, which need not be the
+	// address that made the failing query — a pool can report from a different
+	// member, and seeing that is worth more than hiding it.
+	ReporterAddr   string `json:"reporter_addr"`
+	ReporterPrefix string `json:"reporter_prefix"`
+	Transport      string `json:"transport"`
+}
+
 // Report is the response body.
 type Report struct {
 	Token string `json:"token"`
@@ -201,6 +241,12 @@ type Report struct {
 	// resolver pool answers from several addresses, and that is worth showing
 	// rather than flattening away.
 	Resolvers []string `json:"resolvers"`
+	// ErrorReports are the RFC 9567 reports this token's failures provoked,
+	// oldest first. Empty is the common case and is NOT a finding: almost no
+	// resolver implements the reporting side, reports are lossy, and one can
+	// still be in flight. A page must render this as "none received", never as
+	// "nothing failed".
+	ErrorReports []ErrorReport `json:"error_reports"`
 }
 
 // Store reads observations written by the probe plugin.
@@ -208,8 +254,9 @@ type Store struct {
 	Client valkey.Client
 }
 
-func seenKey(token string) string { return "probe:seen:" + token }
-func obsKey(token string) string  { return "probe:obs:" + token }
+func seenKey(token string) string    { return "probe:seen:" + token }
+func obsKey(token string) string     { return "probe:obs:" + token }
+func reportsKey(token string) string { return "probe:reports:" + token }
 
 // ErrNoStore means no Valkey client was configured, so there is nothing to read.
 var ErrNoStore = errors.New("probereport: no valkey client configured")
@@ -220,6 +267,13 @@ var ErrNoStore = errors.New("probereport: no valkey client configured")
 // reached us" case, which happens legitimately (a resolver that failed, or a
 // browser that never issued the lookups) and is one of the more interesting
 // things the page can say.
+//
+// Only the token's OWN error reports are read. The plugin also keeps an
+// unattributed list — reports whose failing name carried no token — and that one
+// stays operator-only, visible through the plugin's Prometheus counters and in
+// Valkey. Serving it from a token-addressed endpoint would hand every visitor a
+// feed of other people's resolvers and the names they failed on, in exchange for
+// a number no individual visitor can act on.
 func (s *Store) Get(token string) (*Report, error) {
 	if s == nil || s.Client == nil {
 		return nil, ErrNoStore
@@ -229,7 +283,12 @@ func (s *Store) Get(token string) (*Report, error) {
 	defer cancel()
 
 	c := s.Client
-	report := &Report{Token: token, Observations: []Observation{}, Resolvers: []string{}}
+	report := &Report{
+		Token:        token,
+		Observations: []Observation{},
+		Resolvers:    []string{},
+		ErrorReports: []ErrorReport{},
+	}
 
 	if n, err := c.Do(ctx, c.B().Get().Key(seenKey(token)).Build()).AsInt64(); err == nil {
 		report.Queries = int(n)
@@ -265,6 +324,25 @@ func (s *Store) Get(token string) (*Report, error) {
 	// reports fewer queries than it is about to list.
 	if report.Queries < len(report.Observations) {
 		report.Queries = len(report.Observations)
+	}
+
+	// Read AFTER the observations and tolerated separately: error reports arrive
+	// on their own schedule and can exist for a token whose observations have
+	// already expired. Failing the whole report because this key is unreadable
+	// would throw away the part that is present.
+	reports, err := c.Do(ctx, c.B().Lrange().Key(reportsKey(token)).Start(0).Stop(-1).Build()).AsStrSlice()
+	if err != nil && !valkey.IsValkeyNil(err) {
+		return nil, err
+	}
+	for _, v := range reports {
+		var er ErrorReport
+		if err := json.Unmarshal([]byte(v), &er); err != nil {
+			// Same reasoning as the observation loop: a partial report beats
+			// none, and a decode mismatch here is the visible symptom of the two
+			// programs' key contract drifting.
+			continue
+		}
+		report.ErrorReports = append(report.ErrorReports, er)
 	}
 	return report, nil
 }
