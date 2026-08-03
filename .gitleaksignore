@@ -1,0 +1,38 @@
+# gitleaks fingerprint allowlist.
+#
+# ONE entry, and it should stay that way. A fingerprint pins a specific finding
+# to a specific commit, file, rule and line, so it cannot silently widen into
+# "stop checking this rule" or "stop checking this file" the way a config
+# exclusion would. If a new finding appears, it is a new finding — fix it in the
+# code rather than adding a line here.
+#
+# Why this file exists at all
+#
+# ci.yml scans with `--log-opts=--all` on pushes to main, which walks all ~275
+# commits — including the upstream history this fork inherited from
+# brianshea2/addr.tools, which we do not control and cannot rewrite. Every push
+# to main has failed on a single finding in upstream's own initial public
+# commit (2024-05-06), long before the fork existed.
+#
+# The finding is a false positive, and upstream says so in the line directly
+# above it:
+#
+#     // not really a secret, published for client <...>, not enforced
+#     TsigSecret = "<...>"
+#
+# It is a deliberately published, unenforced TSIG value for a public test zone.
+# It is also already public in upstream's repository, so nothing is being
+# concealed by this entry that is not already on GitHub.
+#
+# The file was deleted upstream in d155e79 ("remove discontinued zone handlers")
+# and does not exist in this tree. `gitleaks dir .` — the working tree, no
+# history — reports no leaks. So the CURRENT code is clean by the same tool;
+# only the archaeology is red.
+#
+# What this entry does NOT do: it does not weaken scanning of anything we write.
+# The rule stays enabled, the file glob stays unrestricted, and any new
+# occurrence of a real credential — including a re-introduction of this exact
+# string in a live file — produces a different fingerprint and still fails.
+#
+# Format: <commit>:<path>:<rule-id>:<start-line>
+79ddbcb414a2c10377de4857be137fa9e99c1e30:internal/zones/ip/api.go:generic-api-key:18
