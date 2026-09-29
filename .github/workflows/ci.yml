@@ -40,9 +40,9 @@ env:
   OPENGREP_VERSION: "1.25.0"
   # No release tags are published for the rule set, so this is pinned by commit.
   OPENGREP_RULES_SHA: "f1d2b562b414783763fd02a6ed2736eaed622efa"
-  GOVULNCHECK_VERSION: "v1.1.4"
+  GOVULNCHECK_VERSION: "v1.8.0"
   CYCLONEDX_VERSION: "v1.7.0"
-  GOLANGCI_VERSION: "v2.12.2"
+  GOLANGCI_VERSION: "v2.14.0"
 
 jobs:
   test:

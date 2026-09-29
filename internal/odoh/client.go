@@ -85,13 +85,13 @@ func (c *Client) EncryptQuery(dnsQuery, padding []byte) (Message, *PendingQuery,
 	}
 
 	return Message{
-			Type:      MessageTypeQuery,
-			KeyID:     c.keyID,
-			Encrypted: append(enc, ct...),
-		}, &PendingQuery{
-			sender:     sender,
-			queryPlain: queryPlain,
-		}, nil
+		Type:      MessageTypeQuery,
+		KeyID:     c.keyID,
+		Encrypted: append(enc, ct...),
+	}, &PendingQuery{
+		sender:     sender,
+		queryPlain: queryPlain,
+	}, nil
 }
 
 // DecryptResponse opens the target's response.
